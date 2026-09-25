@@ -79,7 +79,7 @@ export default function RoomsScreen() {
   });
   const closeModal = () => setModal(m => ({ ...m, open: false }));
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const { form, editId } = modal;
     if (!form.name.trim() || !form.capacity.trim()) return;
     const existing = editId ? rooms.find(r => r.id === editId) : undefined;
@@ -98,8 +98,9 @@ export default function RoomsScreen() {
       setRooms(prev => prev.map(r => r.id === editId ? { ...r, ...base } : r));
       try { void roomsApi.update(editId, base); } catch { /* offline */ }
     } else {
-      const id = 'r' + Date.now();
-      setRooms(prev => [...prev, { ...base, id }]);
+      const payload = { ...base, id: `r${Date.now()}` };
+      setRooms(prev => [...prev, payload]);
+      try { await roomsApi.create(payload); } catch { /* offline */ }
     }
     closeModal();
   };

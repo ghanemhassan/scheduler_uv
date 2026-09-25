@@ -4,7 +4,7 @@ import { auth as authApi, setToken } from './api/client';
 
 type Role = 'admin' | 'lecturer' | 'student';
 
-interface Props { onLogin: (role: Role, displayName?: string) => void; }
+interface Props { onLogin: (role: Role, displayName?: string, email?: string, token?: string) => void; }
 
 export default function LoginScreen({ onLogin }: Props) {
   const { tokens: C, isDark, toggle } = useTheme();
@@ -29,7 +29,7 @@ export default function LoginScreen({ onLogin }: Props) {
       const res = await authApi.login(email.trim(), password);
       setToken(res.token);
       setPhase('idle');
-      onLogin(res.role, res.display_name);
+      onLogin(res.role, res.display_name, email.trim(), res.token);
       return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';

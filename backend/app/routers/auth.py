@@ -87,6 +87,15 @@ def is_admin_authorization(authorization: str) -> bool:
     )
 
 
+def get_email_from_auth(authorization: str) -> str | None:
+    """Return the JWT subject email, or None if missing/invalid."""
+    scheme, _, token = authorization.partition(' ')
+    if scheme.lower() != 'bearer' or not token:
+        return None
+    parsed = _parse_token(token)
+    return parsed[0] if parsed else None
+
+
 def require_admin(authorization: str) -> None:
     if not is_admin_authorization(authorization):
         raise HTTPException(status_code=403, detail='Only admins can perform this action.')

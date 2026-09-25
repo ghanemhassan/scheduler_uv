@@ -8,7 +8,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.types import JSON
 from dotenv import load_dotenv
@@ -20,7 +20,9 @@ PASSWORD_HASH = PasswordHash.recommended()
 
 DATABASE_URL = os.getenv(
     'DATABASE_URL',
-    'mysql+pymysql://root:password@127.0.0.1:3306/bua_project',
+    # Keep local development runnable without requiring a MySQL service.
+    # Deployments can set DATABASE_URL to the documented MySQL connection.
+    'sqlite:///./bua_project.db',
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
@@ -53,8 +55,9 @@ class TimetableCellRow(Base):
     view: Mapped[str] = mapped_column(String(32))
     row_name: Mapped[str] = mapped_column(String(255))
     day_index: Mapped[int] = mapped_column(Integer)
+    slot_index: Mapped[int] = mapped_column(Integer, default=0)
     session_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    __table_args__ = (UniqueConstraint('view', 'row_name', 'day_index', name='uq_timetable_cell'),)
+    __table_args__ = (UniqueConstraint('view', 'row_name', 'day_index', 'slot_index', name='uq_timetable_cell'),)
 
 
 class RoomRow(Base):
@@ -71,6 +74,36 @@ class StudentRow(Base):
 
 class ScheduleVersionRow(Base):
     __tablename__ = 'schedule_versions'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class CourseRow(Base):
+    __tablename__ = 'courses'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class SectionRow(Base):
+    __tablename__ = 'sections'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class RegistrationRow(Base):
+    __tablename__ = 'registrations'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class NotificationRow(Base):
+    __tablename__ = 'notifications'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class AuditRow(Base):
+    __tablename__ = 'audit_logs'
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
 
@@ -94,9 +127,39 @@ def _load_settings(db: Session, key: str, fallback: list[str]) -> list[str]:
     return json.loads(row.value)
 
 
+def _migrate_timetable_slots() -> None:
+    """Add slot_index to existing MySQL tables created before day+slot allocations."""
+    inspector = inspect(engine)
+    if 'timetable_cells' not in inspector.get_table_names():
+        return
+    columns = {col['name'] for col in inspector.get_columns('timetable_cells')}
+    if 'slot_index' in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text('ALTER TABLE timetable_cells ADD COLUMN slot_index INT NOT NULL DEFAULT 0'))
+        conn.execute(text('ALTER TABLE timetable_cells DROP INDEX uq_timetable_cell'))
+        conn.execute(text(
+            'ALTER TABLE timetable_cells ADD UNIQUE KEY uq_timetable_cell '
+            '(view, row_name, day_index, slot_index)'
+        ))
+        rows = conn.execute(text('SELECT id, session_json FROM timetable_cells')).mappings().all()
+        for row in rows:
+            payload = row['session_json']
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            slot = 0
+            if isinstance(payload, dict):
+                slot = int(payload.get('slot') or 0)
+            conn.execute(
+                text('UPDATE timetable_cells SET slot_index = :slot WHERE id = :id'),
+                {'slot': slot, 'id': row['id']},
+            )
+
+
 def initialize_database() -> None:
     """Create the schema, seed once, then load persisted state into compatibility objects."""
     Base.metadata.create_all(engine)
+    _migrate_timetable_slots()
     from app import data_store
 
     with SessionLocal.begin() as db:
@@ -116,6 +179,22 @@ def initialize_database() -> None:
         if db.scalar(select(ScheduleVersionRow.id).limit(1)) is None:
             for version in data_store.VERSIONS:
                 db.add(ScheduleVersionRow(id=version.id, payload=_dump_model(version)))
+        if db.scalar(select(CourseRow.id).limit(1)) is None:
+            for course in data_store.COURSES:
+                db.add(CourseRow(id=course.id, payload=_dump_model(course)))
+        if db.scalar(select(SectionRow.id).limit(1)) is None:
+            for section in data_store.SECTIONS:
+                db.add(SectionRow(id=section.id, payload=_dump_model(section)))
+        if db.scalar(select(RegistrationRow.id).limit(1)) is None:
+            for reg in data_store.REGISTRATIONS:
+                db.add(RegistrationRow(id=reg.id, payload=_dump_model(reg)))
+        if db.scalar(select(NotificationRow.id).limit(1)) is None:
+            for notif in data_store.NOTIFICATIONS:
+                db.add(NotificationRow(id=notif.id, payload=_dump_model(notif)))
+        # Audit logs table will be created by create_all; seed empty if needed
+        if db.scalar(select(AuditRow.id).limit(1)) is None:
+            for evt in getattr(data_store, 'AUDIT_LOGS', []):
+                db.add(AuditRow(id=evt.id, payload=_dump_model(evt)))
         if db.scalar(select(SettingRow).where(SettingRow.key == 'days')) is None:
             db.add(SettingRow(key='days', value=json.dumps(data_store.DAYS)))
         if db.scalar(select(SettingRow).where(SettingRow.key == 'time_slots')) is None:
@@ -123,13 +202,51 @@ def initialize_database() -> None:
         for key, values in (('rooms', data_store.ROOMS), ('labs', data_store.LABS), ('staff', data_store.STAFF)):
             if db.scalar(select(SettingRow).where(SettingRow.key == key)) is None:
                 db.add(SettingRow(key=key, value=json.dumps(values)))
+        for key, values in (('terms', data_store.ACADEMIC_TERMS), ('holidays', data_store.HOLIDAYS),
+                            ('departments', data_store.DEPARTMENTS),
+                            ('staff_unavailability', data_store.STAFF_UNAVAILABILITY)):
+            if db.scalar(select(SettingRow).where(SettingRow.key == key)) is None:
+                db.add(SettingRow(key=key, value=json.dumps(values)))
         if db.scalar(select(SettingRow).where(SettingRow.key == 'conflicts')) is None:
             db.add(SettingRow(key='conflicts', value=json.dumps([_dump_model(conflict) for conflict in data_store.CONFLICTS])))
+        # One-time migration: Mon-Fri teaching week -> Sat-Wed.
+        # Only migrates untouched defaults; admin-renamed days are preserved.
+        # Grid indexes (0-4) are unchanged, so no cell migration is needed.
+        _OLD_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+        _OLD_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+        try:
+            _drow = db.get(SettingRow, 'days')
+            if _drow is not None and json.loads(_drow.value or '[]') == _OLD_DAYS:
+                _drow.value = json.dumps(data_store.DAYS)
+            _frow = db.get(SettingRow, 'full_days')
+            if _frow is not None:
+                try:
+                    _fcur = json.loads(_frow.value or '[]')
+                except Exception:
+                    _fcur = None
+                if _fcur == _OLD_FULL:
+                    _frow.value = json.dumps(data_store.FULL_DAYS)
+        except Exception:
+            pass
         if db.scalar(select(TimetableCellRow.id).limit(1)) is None:
             for view, rows in data_store.TIMETABLE.items():
                 for row_name, days in rows.items():
-                    for day, session in days.items():
-                        db.add(TimetableCellRow(view=view, row_name=row_name, day_index=day, session_json=_dump_model(session) if session else None))
+                    for day, slots in days.items():
+                        if isinstance(slots, dict):
+                            for slot, session in slots.items():
+                                db.add(TimetableCellRow(
+                                    view=view, row_name=row_name, day_index=int(day),
+                                    slot_index=int(slot),
+                                    session_json=_dump_model(session) if session else None,
+                                ))
+                        else:
+                            session = slots
+                            slot = getattr(session, 'slot', 0) if session else 0
+                            db.add(TimetableCellRow(
+                                view=view, row_name=row_name, day_index=int(day),
+                                slot_index=int(slot),
+                                session_json=_dump_model(session) if session else None,
+                            ))
 
     load_persisted_state()
 
@@ -137,7 +254,6 @@ def initialize_database() -> None:
 def load_persisted_state() -> None:
     from app import data_store
     from app.models.schema import Room, ScheduleVersion, Session
-
     with SessionLocal() as db:
         user_rows = db.scalars(select(UserRow)).all()
         if user_rows:
@@ -146,10 +262,24 @@ def load_persisted_state() -> None:
                 for row in user_rows
             ]
         data_store.DAYS[:] = _load_settings(db, 'days', data_store.DAYS)
+        # keep FULL_DAYS in sync with DAYS
+        try:
+            loaded_full = _load_settings(db, 'full_days', data_store.FULL_DAYS)
+            if len(loaded_full) == len(data_store.DAYS):
+                data_store.FULL_DAYS[:] = loaded_full
+            elif loaded_full:
+                # pad/truncate to match DAYS length
+                data_store.FULL_DAYS[:] = (loaded_full + data_store.DAYS[len(loaded_full):])[:len(data_store.DAYS)]
+        except Exception:
+            pass
         data_store.TIME_SLOTS[:] = _load_settings(db, 'time_slots', data_store.TIME_SLOTS)
         data_store.ROOMS[:] = _load_settings(db, 'rooms', data_store.ROOMS)
         data_store.LABS[:] = _load_settings(db, 'labs', data_store.LABS)
         data_store.STAFF[:] = _load_settings(db, 'staff', data_store.STAFF)
+        data_store.ACADEMIC_TERMS[:] = _load_settings(db, 'terms', data_store.ACADEMIC_TERMS)
+        data_store.HOLIDAYS[:] = _load_settings(db, 'holidays', data_store.HOLIDAYS)
+        data_store.DEPARTMENTS[:] = _load_settings(db, 'departments', data_store.DEPARTMENTS)
+        data_store.STAFF_UNAVAILABILITY[:] = _load_settings(db, 'staff_unavailability', data_store.STAFF_UNAVAILABILITY)
         conflict_row = db.get(SettingRow, 'conflicts')
         if conflict_row is not None:
             from app.models.schema import Conflict
@@ -163,32 +293,76 @@ def load_persisted_state() -> None:
         version_rows = db.scalars(select(ScheduleVersionRow)).all()
         if version_rows:
             data_store.VERSIONS[:] = [ScheduleVersion.model_validate(row.payload) for row in version_rows]
+        from app.models.schema import Course, Section, CourseRegistration, Notification, AuditEvent
+        course_rows = db.scalars(select(CourseRow)).all()
+        if course_rows:
+            data_store.COURSES[:] = [Course.model_validate(row.payload) for row in course_rows]
+        section_rows = db.scalars(select(SectionRow)).all()
+        if section_rows:
+            data_store.SECTIONS[:] = [Section.model_validate(row.payload) for row in section_rows]
+        reg_rows = db.scalars(select(RegistrationRow)).all()
+        if reg_rows:
+            data_store.REGISTRATIONS[:] = [CourseRegistration.model_validate(row.payload) for row in reg_rows]
+        notif_rows = db.scalars(select(NotificationRow)).all()
+        if notif_rows:
+            data_store.NOTIFICATIONS[:] = [Notification.model_validate(row.payload) for row in notif_rows]
+        audit_rows = db.scalars(select(AuditRow)).all()
+        if audit_rows:
+            data_store.AUDIT_LOGS[:] = [AuditEvent.model_validate(row.payload) for row in audit_rows]
         cell_rows = db.scalars(select(TimetableCellRow)).all()
         if cell_rows:
             data_store.TIMETABLE.clear()
+            slot_count = max(len(data_store.TIME_SLOTS), 1)
             for cell in cell_rows:
-                data_store.TIMETABLE.setdefault(cell.view, {}).setdefault(cell.row_name, {})[cell.day_index] = Session.model_validate(cell.session_json) if cell.session_json else None
+                session = Session.model_validate(cell.session_json) if cell.session_json else None
+                slot = int(getattr(cell, 'slot_index', 0) or (session.slot if session else 0))
+                if session is not None:
+                    session.slot = slot
+                day_map = data_store.TIMETABLE.setdefault(cell.view, {}).setdefault(cell.row_name, {})
+                slots = day_map.setdefault(cell.day_index, {i: None for i in range(slot_count)})
+                if not isinstance(slots, dict):
+                    slots = {i: None for i in range(slot_count)}
+                    day_map[cell.day_index] = slots
+                slots[slot] = session
             for view in ('rooms', 'labs', 'staff'):
                 data_store.TIMETABLE.setdefault(view, {})
             for rows in data_store.TIMETABLE.values():
                 for days in rows.values():
                     for day in range(len(data_store.DAYS)):
-                        days.setdefault(day, None)
+                        day_slots = days.setdefault(day, {i: None for i in range(slot_count)})
+                        if not isinstance(day_slots, dict):
+                            days[day] = {i: None for i in range(slot_count)}
+                            continue
+                        for slot in range(slot_count):
+                            day_slots.setdefault(slot, None)
 
 
-def save_timetable_cell(view: str, row_name: str, day: int, session: Any | None) -> None:
+def save_timetable_cell(view: str, row_name: str, day: int, session: Any | None, slot: int | None = None) -> None:
+    slot_index = int(slot if slot is not None else getattr(session, 'slot', 0) or 0)
     with SessionLocal.begin() as db:
-        row = db.scalar(select(TimetableCellRow).where(TimetableCellRow.view == view, TimetableCellRow.row_name == row_name, TimetableCellRow.day_index == day))
+        row = db.scalar(select(TimetableCellRow).where(
+            TimetableCellRow.view == view,
+            TimetableCellRow.row_name == row_name,
+            TimetableCellRow.day_index == day,
+            TimetableCellRow.slot_index == slot_index,
+        ))
         payload = _dump_model(session) if session else None
         if row is None:
-            db.add(TimetableCellRow(view=view, row_name=row_name, day_index=day, session_json=payload))
+            db.add(TimetableCellRow(
+                view=view, row_name=row_name, day_index=day,
+                slot_index=slot_index, session_json=payload,
+            ))
         else:
             row.session_json = payload
 
 
 def save_timetable_row(view: str, row_name: str, days: dict[int, Any | None]) -> None:
-    for day, session in days.items():
-        save_timetable_cell(view, row_name, day, session)
+    for day, slots in days.items():
+        if isinstance(slots, dict):
+            for slot, session in slots.items():
+                save_timetable_cell(view, row_name, int(day), session, int(slot))
+        else:
+            save_timetable_cell(view, row_name, int(day), slots)
 
 
 def save_setting(key: str, value: Any) -> None:
@@ -283,3 +457,74 @@ def delete_version(version_id: str) -> None:
         row = db.get(ScheduleVersionRow, version_id)
         if row is not None:
             db.delete(row)
+
+
+def save_course(course: Any) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(CourseRow, course.id)
+        payload = _dump_model(course)
+        if row is None:
+            db.add(CourseRow(id=course.id, payload=payload))
+        else:
+            row.payload = payload
+
+
+def delete_course(course_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(CourseRow, course_id)
+        if row is not None:
+            db.delete(row)
+
+
+def save_section(section: Any) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(SectionRow, section.id)
+        payload = _dump_model(section)
+        if row is None:
+            db.add(SectionRow(id=section.id, payload=payload))
+        else:
+            row.payload = payload
+
+
+def delete_section(section_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(SectionRow, section_id)
+        if row is not None:
+            db.delete(row)
+
+
+def save_registration(reg: Any) -> None:
+    with SessionLocal.begin() as db:
+        payload = _dump_model(reg)
+        row = db.get(RegistrationRow, reg.id)
+        if row is None:
+            db.add(RegistrationRow(id=reg.id, payload=payload))
+        else:
+            row.payload = payload
+
+
+def delete_registration(reg_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(RegistrationRow, reg_id)
+        if row is not None:
+            db.delete(row)
+
+
+def save_notification(notif: Any) -> None:
+    with SessionLocal.begin() as db:
+        payload = _dump_model(notif)
+        row = db.get(NotificationRow, notif.id)
+        if row is None:
+            db.add(NotificationRow(id=notif.id, payload=payload))
+        else:
+            row.payload = payload
+
+
+def save_audit(event: Any) -> None:
+    with SessionLocal.begin() as db:
+        payload = _dump_model(event)
+        row = db.get(AuditRow, event.id)
+        if row is None:
+            db.add(AuditRow(id=event.id, payload=payload))
+        else:
+            row.payload = payload

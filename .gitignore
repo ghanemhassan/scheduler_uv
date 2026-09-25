@@ -11,5 +11,6 @@ venv/
 *.egg-info/
 .vite/
 *.tsbuildinfo
+*.db
 .DS_Store
 =2.9.0

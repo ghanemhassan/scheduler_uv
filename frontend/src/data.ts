@@ -30,10 +30,14 @@ export interface Session {
   enrolled: number;
   color: string;
   conflictId?: string;
+  slot?: number;      // start time-slot index (0 = 08:00), when synced from backend
+  duration?: number;  // number of consecutive slots
+  academic_year?: number; // 1-4
+  major?: 'CS' | 'IT' | 'AI' | 'DS';
 }
 
-export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-export const FULL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+export const DAYS = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed'];
+export const FULL_DAYS = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday'];
 
 export const TIME_SLOTS = [
   '08:00', '09:00', '10:00', '11:00', '12:00',

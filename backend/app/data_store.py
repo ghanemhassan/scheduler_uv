@@ -10,12 +10,13 @@ from app.models.schema import (
     Session, Conflict, ConflictCell, Alternative,
     Room, ClosureWindow, ScheduleVersion,
     StudentSession, Credit, StudentProfile,
+    Course, Section, CourseRegistration, Notification,
 )
 
 # ── Constants (mirrors data.ts) ───────────────────────────────────────────────
 
-DAYS       = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
-FULL_DAYS  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+DAYS       = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed']
+FULL_DAYS  = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday']
 TIME_SLOTS = ['08:00', '09:00', '10:00', '11:00', '12:00',
               '13:00', '14:00', '15:00', '16:00', '17:00']
 ROOMS  = ['LT-101', 'LT-102', 'LT-201', 'LT-202', 'SEM-A', 'SEM-B', 'SEM-C', 'SEM-D', 'SEM-E', 'Studio-A']
@@ -27,238 +28,171 @@ STAFF  = ['Dr. Chen Wei', 'Prof. Amara Nwosu', 'Dr. Lena Kovač',
           'Prof. Karim Adel', 'Dr. Nadia Samir', 'TA. Youssef Nabil']
 
 VALID_DOMAINS = ['bua.edu.eg', 'staff.bua.edu.eg',
-                 'cs.bua.edu.eg', 'eng.bua.edu.eg']
+                 'cs.bua.edu.eg', 'eng.bua.edu.eg', 'badr.edu.eg']
+
+
+# ── Planning master data (SCH-FR-01): terms, holidays, departments ──────────
+# Holidays close a whole weekday (indexes into DAYS); the conflict engine
+# blocks new placements there with HOLIDAY.
+ACADEMIC_TERMS: list[dict] = [
+    {'id': 'term-fall25', 'name': 'Fall 2025', 'start': '2025-09-20',
+     'end': '2026-01-31', 'is_active': True},
+    {'id': 'term-spring26', 'name': 'Spring 2026', 'start': '2026-02-01',
+     'end': '2026-06-30', 'is_active': False},
+]
+
+HOLIDAYS: list[dict] = []
+
+DEPARTMENTS: list[dict] = [
+    {'id': 'cs', 'name': 'Computer Science', 'code': 'CS'},
+    {'id': 'it', 'name': 'Information Technology', 'code': 'IT'},
+    {'id': 'eng', 'name': 'Engineering', 'code': 'ENG'},
+    {'id': 'sci', 'name': 'Sciences', 'code': 'SCI'},
+    {'id': 'math', 'name': 'Mathematics', 'code': 'MATH'},
+]
+
+
+# ── Staff unavailability requests (SCH-FR-03): lecturers submit their own ───
+# {id, staff, day, slot (or None = whole day), reason}
+STAFF_UNAVAILABILITY: list[dict] = []
+
+
+# ── Staff teaching availability (SCH-FR-03 light) ────────────────────────────
+# Allowed weekday indexes into DAYS (0=Sat … 4=Wed) for each staff member.
+# Staff absent from this map (or mapped to None) = available all teaching days.
+# Example: a doctor who comes Wednesdays only is blocked anywhere else with AVAILABILITY.
+STAFF_TEACHING_DAYS: dict[str, list[int] | None] = {
+    'Dr. Mona Khalil': [4],      # Wednesdays only
+    'Eng. Omar Farouk': [0, 2],  # Saturdays + Mondays
+}
+
+
+# ── Room equipment inventory: working vs total units (SCH-FR-02/05) ──────────
+# {room_name: {equipment_name: {total, working, per_student}}}
+# per_student=True items are 1-per-student (checked against enrolled on placement).
+# Shared items (smartboards…) stay presence-only. Names must match Room.equipment.
+ROOM_EQUIPMENT: dict[str, dict[str, dict]] = {
+    'CS-Lab1': {'PC Workstations': {'total': 60, 'working': 55, 'per_student': True}},
+    'CS-Lab2': {'Mac Workstations': {'total': 40, 'working': 20, 'per_student': True}},
+    'CS-Lab3': {'PC Workstations': {'total': 50, 'working': 45, 'per_student': True}},
+    'BioLab2': {'Microscopes': {'total': 24, 'working': 22, 'per_student': True}},
+}
 
 
 # ── Timetable data (mirrors TIMETABLE_DATA in data.ts) ───────────────────────
 
-def _s(id_, code, name, staff, group, cap, enrolled, color, conflict_id=None):
+def _s(id_, code, name, staff, group, cap, enrolled, color, slot=2, duration=1, conflict_id=None, academic_year=None, major=None):
     return Session(
         id=id_, code=code, name=name, staff=staff, group=group,
         capacity=cap, enrolled=enrolled, color=color,
+        slot=slot, duration=duration,
+        academic_year=academic_year, major=major,
         **({'conflictId': conflict_id} if conflict_id else {}),
     )
 
-_RAW_TIMETABLE: dict[str, dict[str, dict[int, Session | None]]] = {
-    'rooms': {
-        'LT-101': {
-            0: _s('s1',  'CS301',   'Algorithms',         'Dr. Chen Wei',         'CS-3A',    240, 108, '#2563eb'),
-            1: _s('s2',  'MATH201', 'Linear Algebra',     'Prof. Sara Johansson', 'ENG-2B',   240, 235, '#7c3aed', 'c1'),
-            2: None,
-            3: _s('s3',  'CS401',   'ML Foundations',     'Dr. Lena Kovač',       'CS-4A',    240,  94, '#2563eb'),
-            4: _s('s4',  'PHYS101', 'Mechanics',          'Dr. Raj Patel',        'ENG-1A',   240, 120, '#0891b2', 'c2'),
-        },
-        'LT-102': {
-            0: None,
-            1: _s('s5',  'ENG201',  'Circuit Analysis',   'Prof. Amara Nwosu',    'EE-2A',    120,  72, '#059669'),
-            2: _s('s6',  'CS201',   'Data Structures',    'Dr. Chen Wei',         'CS-2A',    120,  78, '#2563eb'),
-            3: None,
-            4: _s('s7',  'MATH301', 'Calculus III',       'Prof. Sara Johansson', 'MATH-3A',  120,  68, '#7c3aed'),
-        },
-        'LT-201': {
-            0: _s('s8',  'BIO101',  'Cell Biology',       'Dr. Marcus Bell',      'BIO-1A',   300, 187, '#be185d'),
-            1: None,
-            2: _s('s9',  'CHEM201', 'Organic Chem',       'Dr. Raj Patel',        'CHEM-2B',  300, 143, '#d97706'),
-            3: _s('s10', 'PHYS201', 'Electrodynamics',    'Dr. Raj Patel',        'PHYS-2A',  300,  98, '#0891b2', 'c2'),
-            4: None,
-        },
-        'LT-202': {
-            0: _s('s18', 'CS101',   'Intro to CS',        'Dr. Ahmed Hassan',     'CS-1A',    180, 172, '#2563eb'),
-            1: _s('s19', 'MATH101', 'Calculus I',         'Dr. Fatma Ali',        'ENG-1B',   180, 165, '#7c3aed'),
-            2: None,
-            3: _s('s20', 'ENG101',  'Statics',            'Prof. John Smith',     'MECH-1A',  180, 150, '#059669'),
-            4: None,
-        },
-        'SEM-A': {
-            0: None,
-            1: _s('s11', 'CS501',   'Distributed Systems','Dr. Lena Kovač',       'CS-MSc',    30,  24, '#2563eb'),
-            2: _s('s12', 'ENG401',  'Control Systems',    'Prof. Amara Nwosu',    'EE-4A',     30,  28, '#059669'),
-            3: None,
-            4: _s('s13', 'MATH501', 'Real Analysis',      'Prof. Sara Johansson', 'MATH-MSc',  30,  18, '#7c3aed'),
-        },
-        'SEM-B': {
-            0: _s('s14', 'CS601',   'Research Methods',   'Dr. Chen Wei',         'PhD-1',     20,  12, '#2563eb'),
-            1: None,
-            2: None,
-            3: _s('s15', 'BIO301',  'Genetics',           'Dr. Marcus Bell',      'BIO-3A',    20,  19, '#be185d'),
-            4: None,
-        },
-        'SEM-C': {
-            0: None,
-            1: _s('s16', 'CHEM401', 'Spectroscopy',       'Dr. Raj Patel',        'CHEM-4A',   20,  16, '#d97706', 'c4'),
-            2: None,
-            3: None,
-            4: _s('s17', 'ENG301',  'Thermodynamics',     'Prof. Amara Nwosu',    'MECH-3A',   20,  20, '#059669', 'c3'),
-        },
-        'SEM-D': {
-            0: _s('s21', 'CS302',   'Operating Systems',  'Dr. Mona Khalil',      'CS-3B',     25,  23, '#2563eb'),
-            1: None,
-            2: _s('s22', 'ENG202',  'Electronics I',      'Eng. Omar Farouk',     'EE-2B',     25,  22, '#059669', 'c5'),
-            3: None,
-            4: None,
-        },
-        'SEM-E': {
-            0: None,
-            1: None,
-            2: _s('s23', 'BIO201',  'Microbiology',       'Dr. Heba Mostafa',     'BIO-2A',    25,  24, '#be185d', 'c6'),
-            3: _s('s24', 'CHEM102', 'General Chem II',    'Prof. Karim Adel',     'CHEM-1A',   25,  21, '#d97706'),
-            4: None,
-        },
-        'Studio-A': {
-            0: None,
-            1: _s('s25', 'CS402',   'HCI Studio',         'Dr. Nadia Samir',      'CS-4B',     22,  20, '#7c3aed'),
-            2: None,
-            3: None,
-            4: None,
-        },
-    },
-    'labs': {
-        'CS-Lab1': {
-            0: _s('lb1', 'CS201L', 'Data Structures Lab', 'Dr. Chen Wei',    'CS-2A', 60, 28, '#2563eb'),
-            1: None,
-            2: _s('lb2', 'CS301L', 'Algorithms Lab',      'Dr. Chen Wei',    'CS-3A', 60, 24, '#2563eb'),
-            3: None,
-            4: _s('lb3', 'CS401L', 'ML Lab',              'Dr. Lena Kovač',  'CS-4A', 60, 22, '#7c3aed'),
-        },
-        'CS-Lab2': {
-            0: None,
-            1: _s('lb4', 'CS501L', 'Distributed Sys Lab', 'Dr. Lena Kovač',  'CS-MSc', 40, 18, '#7c3aed'),
-            2: None,
-            3: _s('lb5', 'CS601L', 'Research Lab',        'Dr. Chen Wei',    'PhD-1',  40, 12, '#2563eb'),
-            4: None,
-        },
-        'CS-Lab3': {
-            0: _s('lb12', 'CS302L', 'OS Lab',             'Dr. Mona Khalil',  'CS-3B', 50, 23, '#2563eb'),
-            1: None, 2: None,
-            3: _s('lb13', 'CS101L', 'Intro CS Lab',       'Dr. Ahmed Hassan', 'CS-1A', 50, 42, '#2563eb'),
-            4: None,
-        },
-        'Phys-Lab': {
-            0: _s('lb6', 'PHYS101L', 'Mechanics Lab',       'Dr. Raj Patel', 'ENG-1A', 48, 24, '#0891b2'),
-            1: None, 2: None,
-            3: _s('lb7', 'PHYS201L', 'Electrodynamics Lab', 'Dr. Raj Patel', 'PHYS-2A', 48, 20, '#0891b2'),
-            4: None,
-        },
-        'Phys-Lab2': {
-            0: None,
-            1: _s('lb14', 'PHYS102L', 'Waves Lab',        'Dr. Fatma Ali',   'ENG-1B', 40, 22, '#0891b2'),
-            2: None, 3: None, 4: None,
-        },
-        'Chem-Lab': {
-            0: None,
-            1: _s('lb8', 'CHEM201L', 'Organic Chem Lab',    'Dr. Raj Patel', 'CHEM-2B', 30, 16, '#d97706'),
-            2: None, 3: None,
-            4: _s('lb9', 'CHEM401L', 'Spectroscopy Lab',    'Dr. Raj Patel', 'CHEM-4A', 30, 14, '#d97706'),
-        },
-        'Chem-Lab B': {
-            0: None, 1: None,
-            2: _s('lb15', 'CHEM102L', 'General Chem Lab', 'Prof. Karim Adel', 'CHEM-1A', 30, 21, '#d97706'),
-            3: None, 4: None,
-        },
-        'BioLab': {
-            0: None, 1: None,
-            2: _s('lb10', 'BIO101L', 'Cell Biology Lab',    'Dr. Marcus Bell', 'BIO-1A', 28, 19, '#be185d'),
-            3: _s('lb11', 'BIO301L', 'Genetics Lab',        'Dr. Marcus Bell', 'BIO-3A', 28, 18, '#be185d'),
-            4: None,
-        },
-        'BioLab2': {
-            0: None,
-            1: _s('lb16', 'BIO201L', 'Microbiology Lab',  'Dr. Heba Mostafa', 'BIO-2A', 24, 22, '#be185d'),
-            2: None, 3: None, 4: None,
-        },
-        'Eng-Workshop': {
-            0: _s('lb17', 'ENG202L', 'Electronics Workshop', 'Eng. Omar Farouk', 'EE-2B', 30, 22, '#059669'),
-            1: None, 2: None, 3: None, 4: None,
-        },
-    },
-    'staff': {
-        'Dr. Chen Wei': {
-            0: _s('sf1', 'CS301',  'Algorithms',          'Dr. Chen Wei', 'CS-3A',  240, 108, '#2563eb'),
-            1: None,
-            2: _s('sf2', 'CS201',  'Data Structures',     'Dr. Chen Wei', 'CS-2A',  120,  78, '#2563eb'),
-            3: None, 4: None,
-        },
-        'Prof. Amara Nwosu': {
-            0: None,
-            1: _s('sf3', 'ENG201', 'Circuit Analysis',    'Prof. Amara Nwosu', 'EE-2A',  120, 72, '#059669'),
-            2: _s('sf4', 'ENG401', 'Control Systems',     'Prof. Amara Nwosu', 'EE-4A',   30, 28, '#059669'),
-            3: None,
-            4: _s('sf5', 'ENG301', 'Thermodynamics',      'Prof. Amara Nwosu', 'MECH-3A', 20, 20, '#059669', 'c3'),
-        },
-        'Dr. Lena Kovač': {
-            0: None,
-            1: _s('sf6', 'CS501',  'Distributed Sys',  'Dr. Lena Kovač', 'CS-MSc',  30, 24, '#7c3aed'),
-            2: None,
-            3: _s('sf7', 'CS401',  'ML Foundations',   'Dr. Lena Kovač', 'CS-4A',  240, 94, '#7c3aed'),
-            4: None,
-        },
-        'Dr. Raj Patel': {
-            0: None,
-            1: _s('sf8', 'CHEM201', 'Organic Chem',     'Dr. Raj Patel', 'CHEM-2B', 300, 143, '#d97706'),
-            2: None,
-            3: _s('sf9', 'PHYS201', 'Electrodynamics',  'Dr. Raj Patel', 'PHYS-2A', 300,  98, '#0891b2', 'c2'),
-            4: _s('sf10', 'PHYS101', 'Mechanics',       'Dr. Raj Patel', 'ENG-1A',  240, 120, '#0891b2', 'c2'),
-        },
-        'Prof. Sara Johansson': {
-            0: None,
-            1: _s('sf11', 'MATH201', 'Linear Algebra',   'Prof. Sara Johansson', 'ENG-2B', 240, 235, '#7c3aed', 'c1'),
-            2: None,
-            3: _s('sf12', 'MATH301', 'Calculus III',     'Prof. Sara Johansson', 'MATH-3A', 120, 68, '#7c3aed'),
-            4: None,
-        },
-        'Dr. Marcus Bell': {
-            0: _s('sf13', 'BIO101',  'Cell Biology',     'Dr. Marcus Bell', 'BIO-1A', 300, 187, '#be185d'),
-            1: None, 2: None,
-            3: _s('sf14', 'BIO301',  'Genetics',         'Dr. Marcus Bell', 'BIO-3A',  28, 19, '#be185d'),
-            4: None,
-        },
-        'Dr. Ahmed Hassan': {
-            0: _s('sf15', 'CS101',   'Intro to CS',      'Dr. Ahmed Hassan', 'CS-1A', 180, 172, '#2563eb'),
-            1: None, 2: None, 3: None, 4: None,
-        },
-        'Dr. Fatma Ali': {
-            0: None,
-            1: _s('sf16', 'MATH101', 'Calculus I',       'Dr. Fatma Ali', 'ENG-1B', 180, 165, '#7c3aed'),
-            2: None, 3: None, 4: None,
-        },
-        'Prof. John Smith': {
-            0: None, 1: None, 2: None,
-            3: _s('sf17', 'ENG101',  'Statics',          'Prof. John Smith', 'MECH-1A', 180, 150, '#059669'),
-            4: None,
-        },
-        'Dr. Mona Khalil': {
-            0: _s('sf18', 'CS302',   'Operating Systems', 'Dr. Mona Khalil', 'CS-3B', 25, 23, '#2563eb'),
-            1: None, 2: None, 3: None, 4: None,
-        },
-        'Eng. Omar Farouk': {
-            0: None, 1: None,
-            2: _s('sf19', 'ENG202',  'Electronics I',      'Eng. Omar Farouk', 'EE-2B', 25, 22, '#059669', 'c5'),
-            3: None, 4: None,
-        },
-        'Dr. Heba Mostafa': {
-            0: None, 1: None,
-            2: _s('sf20', 'BIO201',  'Microbiology',       'Dr. Heba Mostafa', 'BIO-2A', 25, 24, '#be185d', 'c6'),
-            3: None, 4: None,
-        },
-        'Prof. Karim Adel': {
-            0: None, 1: None, 2: None,
-            3: _s('sf21', 'CHEM102', 'General Chem II',    'Prof. Karim Adel', 'CHEM-1A', 25, 21, '#d97706'),
-            4: None,
-        },
-        'Dr. Nadia Samir': {
-            0: None,
-            1: _s('sf22', 'CS402',   'HCI Studio',         'Dr. Nadia Samir', 'CS-4B', 22, 20, '#7c3aed'),
-            2: None, 3: None, 4: None,
-        },
-        'TA. Youssef Nabil': {
-            0: None, 1: None, 2: None, 3: None, 4: None,
-        },
-    },
-}
+
+def _infer_year_major(group: str) -> tuple[int | None, str | None]:
+    """Infer academic_year/major from group like CS-3A, ENG-2B etc. Year 1-2 -> optional, 3-4 -> CS/IT/AI/DS."""
+    try:
+        # group format: PREFIX-YEAR? e.g. CS-3A -> year 3
+        part = group.split('-')[-1] if '-' in group else ''
+        year = int(part[0]) if part and part[0].isdigit() else None
+    except Exception:
+        year = None
+    if year is None:
+        return None, None
+    if year <= 2:
+        return year, None
+    prefix = group.split('-')[0].upper() if '-' in group else group.upper()
+    major_map = {'CS': 'CS', 'IT': 'IT', 'AI': 'AI', 'DS': 'DS',
+                 'EE': 'IT', 'ENG': 'IT', 'MECH': 'IT', 'BIO': 'DS', 'CHEM': 'AI', 'PHYS': 'DS', 'MATH': 'CS'}
+    major = major_map.get(prefix, 'CS')
+    return year, major
+
+
+def _empty_slots() -> dict[int, Session | None]:
+    return {i: None for i in range(len(TIME_SLOTS))}
+
+
+def _empty_week() -> dict[int, dict[int, Session | None]]:
+    return {d: _empty_slots() for d in range(len(DAYS))}
+
+
+def _blank_grid() -> dict[str, dict[str, dict[int, dict[int, Session | None]]]]:
+    return {
+        'rooms': {name: _empty_week() for name in ROOMS},
+        'labs': {name: _empty_week() for name in LABS},
+        'staff': {name: _empty_week() for name in STAFF},
+    }
+
+
+def _put(grid, view: str, row: str, day: int, session: Session) -> None:
+    slot = session.slot
+    grid[view][row][day][slot] = session
+    staff_row = grid['staff'].get(session.staff)
+    if staff_row is not None and staff_row[day][slot] is None:
+        staff_row[day][slot] = session
+
+
+def _build_timetable() -> dict[str, dict[str, dict[int, dict[int, Session | None]]]]:
+    grid = _blank_grid()
+    def mk(id_, code, name, staff, group, cap, enrolled, color, slot, duration=1, conflict_id=None):
+        y, m = _infer_year_major(group)
+        return _s(id_, code, name, staff, group, cap, enrolled, color, slot, duration, conflict_id, y, m)
+    # Lectures / seminars: day + start slot (0 = 08:00). Labs sit in the afternoon.
+    placements = [
+        ('rooms', 'LT-101', 0, mk('s1',  'CS301',   'Algorithms',         'Dr. Chen Wei',         'CS-3A',    240, 108, '#2563eb', 0)),
+        ('rooms', 'LT-101', 1, mk('s2',  'MATH201', 'Linear Algebra',     'Prof. Sara Johansson', 'ENG-2B',   240, 235, '#7c3aed', 1, 1, 'c1')),
+        ('rooms', 'LT-101', 3, mk('s3',  'CS401',   'ML Foundations',     'Dr. Lena Kovač',       'CS-4A',    240,  94, '#2563eb', 3)),
+        ('rooms', 'LT-101', 4, mk('s4',  'PHYS101', 'Mechanics',          'Dr. Raj Patel',        'ENG-1A',   240, 120, '#0891b2', 4, 1, 'c2')),
+        ('rooms', 'LT-102', 1, mk('s5',  'ENG201',  'Circuit Analysis',   'Prof. Amara Nwosu',    'EE-2A',    120,  72, '#059669', 1)),
+        ('rooms', 'LT-102', 2, mk('s6',  'CS201',   'Data Structures',    'Dr. Chen Wei',         'CS-2A',    120,  78, '#2563eb', 2)),
+        ('rooms', 'LT-102', 4, mk('s7',  'MATH301', 'Calculus III',       'Prof. Sara Johansson', 'MATH-3A',  120,  68, '#7c3aed', 3)),
+        ('rooms', 'LT-201', 0, mk('s8',  'BIO101',  'Cell Biology',       'Dr. Marcus Bell',      'BIO-1A',   300, 187, '#be185d', 0)),
+        ('rooms', 'LT-201', 2, mk('s9',  'CHEM201', 'Organic Chem',       'Dr. Raj Patel',        'CHEM-2B',  300, 143, '#d97706', 1)),
+        ('rooms', 'LT-201', 3, mk('s10', 'PHYS201', 'Electrodynamics',    'Dr. Raj Patel',        'PHYS-2A',  300,  98, '#0891b2', 4, 1, 'c2')),
+        ('rooms', 'LT-202', 0, mk('s18', 'CS101',   'Intro to CS',        'Dr. Ahmed Hassan',     'CS-1A',    180, 172, '#2563eb', 0)),
+        ('rooms', 'LT-202', 1, mk('s19', 'MATH101', 'Calculus I',         'Dr. Fatma Ali',        'ENG-1B',   180, 165, '#7c3aed', 1)),
+        ('rooms', 'LT-202', 3, mk('s20', 'ENG101',  'Statics',            'Prof. John Smith',     'MECH-1A',  180, 150, '#059669', 3)),
+        ('rooms', 'SEM-A',  1, mk('s11', 'CS501',   'Distributed Systems','Dr. Lena Kovač',       'CS-MSc',    30,  24, '#2563eb', 1)),
+        ('rooms', 'SEM-A',  2, mk('s12', 'ENG401',  'Control Systems',    'Prof. Amara Nwosu',    'EE-4A',     30,  28, '#059669', 2)),
+        ('rooms', 'SEM-A',  4, mk('s13', 'MATH501', 'Real Analysis',      'Prof. Sara Johansson', 'MATH-MSc',  30,  18, '#7c3aed', 3)),
+        ('rooms', 'SEM-B',  0, mk('s14', 'CS601',   'Research Methods',   'Dr. Chen Wei',         'PhD-1',     20,  12, '#2563eb', 0)),
+        ('rooms', 'SEM-B',  3, mk('s15', 'BIO301',  'Genetics',           'Dr. Marcus Bell',      'BIO-3A',    20,  19, '#be185d', 3)),
+        ('rooms', 'SEM-C',  1, mk('s16', 'CHEM401', 'Spectroscopy',       'Dr. Raj Patel',        'CHEM-4A',   20,  16, '#d97706', 1, 1, 'c4')),
+        ('rooms', 'SEM-C',  4, mk('s17', 'ENG301',  'Thermodynamics',     'Prof. Amara Nwosu',    'MECH-3A',   20,  20, '#059669', 4, 1, 'c3')),
+        ('rooms', 'SEM-D',  0, mk('s21', 'CS302',   'Operating Systems',  'Dr. Mona Khalil',      'CS-3B',     25,  23, '#2563eb', 0)),
+        ('rooms', 'SEM-D',  2, mk('s22', 'ENG202',  'Electronics I',      'Eng. Omar Farouk',     'EE-2B',     25,  22, '#059669', 2, 1, 'c5')),
+        ('rooms', 'SEM-E',  2, mk('s23', 'BIO201',  'Microbiology',       'Dr. Heba Mostafa',     'BIO-2A',    25,  24, '#be185d', 2, 1, 'c6')),
+        ('rooms', 'SEM-E',  3, mk('s24', 'CHEM102', 'General Chem II',    'Prof. Karim Adel',     'CHEM-1A',   25,  21, '#d97706', 3)),
+        ('rooms', 'Studio-A', 1, mk('s25', 'CS402', 'HCI Studio',         'Dr. Nadia Samir',      'CS-4B',     22,  20, '#7c3aed', 1)),
+        ('labs', 'CS-Lab1', 0, mk('lb1', 'CS201L', 'Data Structures Lab', 'Dr. Chen Wei',    'CS-2A', 60, 28, '#2563eb', 6)),
+        ('labs', 'CS-Lab1', 2, mk('lb2', 'CS301L', 'Algorithms Lab',      'Dr. Chen Wei',    'CS-3A', 60, 24, '#2563eb', 6)),
+        ('labs', 'CS-Lab1', 4, mk('lb3', 'CS401L', 'ML Lab',              'Dr. Lena Kovač',  'CS-4A', 60, 22, '#7c3aed', 6)),
+        ('labs', 'CS-Lab2', 1, mk('lb4', 'CS501L', 'Distributed Sys Lab', 'Dr. Lena Kovač',  'CS-MSc', 40, 18, '#7c3aed', 6)),
+        ('labs', 'CS-Lab2', 3, mk('lb5', 'CS601L', 'Research Lab',        'Dr. Chen Wei',    'PhD-1',  40, 12, '#2563eb', 6)),
+        ('labs', 'CS-Lab3', 0, mk('lb12', 'CS302L', 'OS Lab',             'Dr. Mona Khalil',  'CS-3B', 50, 23, '#2563eb', 6)),
+        ('labs', 'CS-Lab3', 3, mk('lb13', 'CS101L', 'Intro CS Lab',       'Dr. Ahmed Hassan', 'CS-1A', 50, 42, '#2563eb', 6)),
+        ('labs', 'Phys-Lab', 0, mk('lb6', 'PHYS101L', 'Mechanics Lab',    'Dr. Raj Patel', 'ENG-1A', 48, 24, '#0891b2', 6)),
+        ('labs', 'Phys-Lab', 3, mk('lb7', 'PHYS201L', 'Electrodynamics Lab', 'Dr. Raj Patel', 'PHYS-2A', 48, 20, '#0891b2', 6)),
+        ('labs', 'Phys-Lab2', 1, mk('lb14', 'PHYS102L', 'Waves Lab',      'Dr. Fatma Ali',   'ENG-1B', 40, 22, '#0891b2', 6)),
+        ('labs', 'Chem-Lab', 1, mk('lb8', 'CHEM201L', 'Organic Chem Lab', 'Dr. Raj Patel', 'CHEM-2B', 30, 16, '#d97706', 6)),
+        ('labs', 'Chem-Lab', 4, mk('lb9', 'CHEM401L', 'Spectroscopy Lab', 'Dr. Raj Patel', 'CHEM-4A', 30, 14, '#d97706', 6)),
+        ('labs', 'Chem-Lab B', 2, mk('lb15', 'CHEM102L', 'General Chem Lab', 'Prof. Karim Adel', 'CHEM-1A', 30, 21, '#d97706', 6)),
+        ('labs', 'BioLab', 2, mk('lb10', 'BIO101L', 'Cell Biology Lab',  'Dr. Marcus Bell', 'BIO-1A', 28, 19, '#be185d', 6)),
+        ('labs', 'BioLab', 3, mk('lb11', 'BIO301L', 'Genetics Lab',      'Dr. Marcus Bell', 'BIO-3A', 28, 18, '#be185d', 6)),
+        ('labs', 'BioLab2', 1, mk('lb16', 'BIO201L', 'Microbiology Lab', 'Dr. Heba Mostafa', 'BIO-2A', 24, 22, '#be185d', 6)),
+        ('labs', 'Eng-Workshop', 0, mk('lb17', 'ENG202L', 'Electronics Workshop', 'Eng. Omar Farouk', 'EE-2B', 30, 22, '#059669', 6)),
+    ]
+    for view, row, day, session in placements:
+        _put(grid, view, row, day, session)
+    return grid
+
+
+_RAW_TIMETABLE = _build_timetable()
 
 # Mutable working copy (lets PUT/PATCH calls modify sessions)
-TIMETABLE: dict[str, dict[str, dict[int, Session | None]]] = deepcopy(_RAW_TIMETABLE)
-
+TIMETABLE: dict[str, dict[str, dict[int, dict[int, Session | None]]]] = deepcopy(_RAW_TIMETABLE)
 
 # ── Conflicts (mirrors CONFLICTS in data.ts) ─────────────────────────────────
 
@@ -591,16 +525,71 @@ VERSIONS: list[ScheduleVersion] = [
 
 
 # ── Student data (mirrors StudentManagerModal defaults + catalog) ─────────────
-
+# academic_year 1-4, major CS/IT/AI/DS required for 3-4
+# At least 5 per year, and for Year 3 & 4 : 5 per major (CS,IT,AI,DS) => 50 total
 MANAGED_STUDENTS: list[dict] = [
-    {'id': 'st1', 'name': 'Amara Osei',    'email': 'amara@bua.edu.eg',   'group': 'CS-3A',   'year': 'Year 3'},
-    {'id': 'st2', 'name': 'Youssef Adel',  'email': 'youssef@bua.edu.eg', 'group': 'CS-2A',   'year': 'Year 2'},
-    {'id': 'st3', 'name': 'Mariam Hany',   'email': 'mariam@bua.edu.eg',  'group': 'ENG-2B',  'year': 'Year 2'},
-    {'id': 'st4', 'name': 'Omar Khaled',   'email': 'omar@bua.edu.eg',    'group': 'CS-3B',   'year': 'Year 3'},
-    {'id': 'st5', 'name': 'Nour Elhouda',  'email': 'nour@bua.edu.eg',    'group': 'BIO-2A',  'year': 'Year 2'},
-    {'id': 'st6', 'name': 'Karim Samy',    'email': 'karim@bua.edu.eg',   'group': 'EE-2A',   'year': 'Year 2'},
-    {'id': 'st7', 'name': 'Salma Tarek',   'email': 'salma@bua.edu.eg',   'group': 'CS-1A',   'year': 'Year 1'},
-    {'id': 'st8', 'name': 'Mostafa Fathy', 'email': 'mostafa@bua.edu.eg', 'group': 'MECH-3A', 'year': 'Year 3'},
+    # ── Year 1 — General (no major) — 5 students ──
+    {'id': 'st1', 'name': 'Amara Osei',       'email': 'amara@bua.edu.eg',            'group': 'CS-3A',   'year': 'Year 3', 'academic_year': 3, 'major': 'CS'}, # keep legacy admin-visible student
+    {'id': 'st7', 'name': 'Salma Tarek',      'email': 'salma@bua.edu.eg',            'group': 'CS-1A',   'year': 'Year 1', 'academic_year': 1, 'major': None},
+    {'id': 'st_y1_1', 'name': 'Y1 Student One',   'email': 'student.y1.gen1@bua.edu.eg', 'group': 'CS-1A',   'year': 'Year 1', 'academic_year': 1, 'major': None},
+    {'id': 'st_y1_2', 'name': 'Y1 Student Two',   'email': 'student.y1.gen2@bua.edu.eg', 'group': 'CS-1B',   'year': 'Year 1', 'academic_year': 1, 'major': None},
+    {'id': 'st_y1_3', 'name': 'Y1 Student Three', 'email': 'student.y1.gen3@bua.edu.eg', 'group': 'ENG-1A',  'year': 'Year 1', 'academic_year': 1, 'major': None},
+    {'id': 'st_y1_4', 'name': 'Y1 Student Four',  'email': 'student.y1.gen4@bua.edu.eg', 'group': 'BIO-1A',  'year': 'Year 1', 'academic_year': 1, 'major': None},
+    {'id': 'st_y1_5', 'name': 'Y1 Student Five',  'email': 'student.y1.gen5@bua.edu.eg', 'group': 'ENG-1B',  'year': 'Year 1', 'academic_year': 1, 'major': None},
+    # ── Year 2 — General (no major, except IT example) — 5 students ──
+    {'id': 'st2', 'name': 'Youssef Adel',     'email': 'youssef@bua.edu.eg',          'group': 'CS-2A',   'year': 'Year 2', 'academic_year': 2, 'major': None},
+    {'id': 'st3', 'name': 'Mariam Hany',      'email': 'mariam@bua.edu.eg',           'group': 'ENG-2B',  'year': 'Year 2', 'academic_year': 2, 'major': None},
+    {'id': 'st5', 'name': 'Nour Elhouda',     'email': 'nour@bua.edu.eg',             'group': 'BIO-2A',  'year': 'Year 2', 'academic_year': 2, 'major': None},
+    {'id': 'st6', 'name': 'Karim Samy',       'email': 'karim@bua.edu.eg',            'group': 'EE-2A',   'year': 'Year 2', 'academic_year': 2, 'major': 'IT'},
+    {'id': 'st_y2_5', 'name': 'Y2 Student Five',  'email': 'student.y2.gen5@bua.edu.eg', 'group': 'CHEM-2B', 'year': 'Year 2', 'academic_year': 2, 'major': None},
+    # ── Year 3 — 5 per major (20 students) ──
+    # CS major
+    {'id': 'st_y3_cs1', 'name': 'Y3 CS One',   'email': 'student.y3.cs1@bua.edu.eg',  'group': 'CS-3A', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'},
+    {'id': 'st_y3_cs2', 'name': 'Y3 CS Two',   'email': 'student.y3.cs2@bua.edu.eg',  'group': 'CS-3B', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'},
+    {'id': 'st_y3_cs3', 'name': 'Y3 CS Three', 'email': 'student.y3.cs3@bua.edu.eg',  'group': 'CS-3C', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'},
+    {'id': 'st_y3_cs4', 'name': 'Y3 CS Four',  'email': 'student.y3.cs4@bua.edu.eg',  'group': 'CS-3D', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'},
+    {'id': 'st_y3_cs5', 'name': 'Y3 CS Five',  'email': 'student.y3.cs5@bua.edu.eg',  'group': 'CS-3E', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'},
+    {'id': 'st4', 'name': 'Omar Khaled',      'email': 'omar@bua.edu.eg',             'group': 'CS-3B', 'year': 'Year 3', 'academic_year': 3, 'major': 'CS'}, # legacy keep
+    # IT major
+    {'id': 'st_y3_it1', 'name': 'Y3 IT One',   'email': 'student.y3.it1@bua.edu.eg',  'group': 'IT-3A', 'year': 'Year 3', 'academic_year': 3, 'major': 'IT'},
+    {'id': 'st_y3_it2', 'name': 'Y3 IT Two',   'email': 'student.y3.it2@bua.edu.eg',  'group': 'IT-3B', 'year': 'Year 3', 'academic_year': 3, 'major': 'IT'},
+    {'id': 'st_y3_it3', 'name': 'Y3 IT Three', 'email': 'student.y3.it3@bua.edu.eg',  'group': 'IT-3C', 'year': 'Year 3', 'academic_year': 3, 'major': 'IT'},
+    {'id': 'st_y3_it4', 'name': 'Y3 IT Four',  'email': 'student.y3.it4@bua.edu.eg',  'group': 'IT-3D', 'year': 'Year 3', 'academic_year': 3, 'major': 'IT'},
+    {'id': 'st_y3_it5', 'name': 'Y3 IT Five',  'email': 'student.y3.it5@bua.edu.eg',  'group': 'IT-3E', 'year': 'Year 3', 'academic_year': 3, 'major': 'IT'},
+    {'id': 'st8', 'name': 'Mostafa Fathy',    'email': 'mostafa@bua.edu.eg',          'group': 'MECH-3A','year': 'Year 3', 'academic_year': 3, 'major': 'IT'}, # legacy IT example
+    # AI major
+    {'id': 'st_y3_ai1', 'name': 'Y3 AI One',   'email': 'student.y3.ai1@bua.edu.eg',  'group': 'AI-3A', 'year': 'Year 3', 'academic_year': 3, 'major': 'AI'},
+    {'id': 'st_y3_ai2', 'name': 'Y3 AI Two',   'email': 'student.y3.ai2@bua.edu.eg',  'group': 'AI-3B', 'year': 'Year 3', 'academic_year': 3, 'major': 'AI'},
+    {'id': 'st_y3_ai3', 'name': 'Y3 AI Three', 'email': 'student.y3.ai3@bua.edu.eg',  'group': 'AI-3C', 'year': 'Year 3', 'academic_year': 3, 'major': 'AI'},
+    {'id': 'st_y3_ai4', 'name': 'Y3 AI Four',  'email': 'student.y3.ai4@bua.edu.eg',  'group': 'AI-3D', 'year': 'Year 3', 'academic_year': 3, 'major': 'AI'},
+    {'id': 'st_y3_ai5', 'name': 'Y3 AI Five',  'email': 'student.y3.ai5@bua.edu.eg',  'group': 'AI-3E', 'year': 'Year 3', 'academic_year': 3, 'major': 'AI'},
+    # DS major
+    {'id': 'st_y3_ds1', 'name': 'Y3 DS One',   'email': 'student.y3.ds1@bua.edu.eg',  'group': 'DS-3A', 'year': 'Year 3', 'academic_year': 3, 'major': 'DS'},
+    {'id': 'st_y3_ds2', 'name': 'Y3 DS Two',   'email': 'student.y3.ds2@bua.edu.eg',  'group': 'DS-3B', 'year': 'Year 3', 'academic_year': 3, 'major': 'DS'},
+    {'id': 'st_y3_ds3', 'name': 'Y3 DS Three', 'email': 'student.y3.ds3@bua.edu.eg',  'group': 'DS-3C', 'year': 'Year 3', 'academic_year': 3, 'major': 'DS'},
+    {'id': 'st_y3_ds4', 'name': 'Y3 DS Four',  'email': 'student.y3.ds4@bua.edu.eg',  'group': 'DS-3D', 'year': 'Year 3', 'academic_year': 3, 'major': 'DS'},
+    {'id': 'st_y3_ds5', 'name': 'Y3 DS Five',  'email': 'student.y3.ds5@bua.edu.eg',  'group': 'DS-3E', 'year': 'Year 3', 'academic_year': 3, 'major': 'DS'},
+    # ── Year 4 — 5 per major (20 students) ──
+    {'id': 'st_y4_cs1', 'name': 'Y4 CS One',   'email': 'student.y4.cs1@bua.edu.eg',  'group': 'CS-4A', 'year': 'Year 4', 'academic_year': 4, 'major': 'CS'},
+    {'id': 'st_y4_cs2', 'name': 'Y4 CS Two',   'email': 'student.y4.cs2@bua.edu.eg',  'group': 'CS-4B', 'year': 'Year 4', 'academic_year': 4, 'major': 'CS'},
+    {'id': 'st_y4_cs3', 'name': 'Y4 CS Three', 'email': 'student.y4.cs3@bua.edu.eg',  'group': 'CS-4C', 'year': 'Year 4', 'academic_year': 4, 'major': 'CS'},
+    {'id': 'st_y4_cs4', 'name': 'Y4 CS Four',  'email': 'student.y4.cs4@bua.edu.eg',  'group': 'CS-4D', 'year': 'Year 4', 'academic_year': 4, 'major': 'CS'},
+    {'id': 'st_y4_cs5', 'name': 'Y4 CS Five',  'email': 'student.y4.cs5@bua.edu.eg',  'group': 'CS-4E', 'year': 'Year 4', 'academic_year': 4, 'major': 'CS'},
+    {'id': 'st_y4_it1', 'name': 'Y4 IT One',   'email': 'student.y4.it1@bua.edu.eg',  'group': 'IT-4A', 'year': 'Year 4', 'academic_year': 4, 'major': 'IT'},
+    {'id': 'st_y4_it2', 'name': 'Y4 IT Two',   'email': 'student.y4.it2@bua.edu.eg',  'group': 'IT-4B', 'year': 'Year 4', 'academic_year': 4, 'major': 'IT'},
+    {'id': 'st_y4_it3', 'name': 'Y4 IT Three', 'email': 'student.y4.it3@bua.edu.eg',  'group': 'IT-4C', 'year': 'Year 4', 'academic_year': 4, 'major': 'IT'},
+    {'id': 'st_y4_it4', 'name': 'Y4 IT Four',  'email': 'student.y4.it4@bua.edu.eg',  'group': 'IT-4D', 'year': 'Year 4', 'academic_year': 4, 'major': 'IT'},
+    {'id': 'st_y4_it5', 'name': 'Y4 IT Five',  'email': 'student.y4.it5@bua.edu.eg',  'group': 'IT-4E', 'year': 'Year 4', 'academic_year': 4, 'major': 'IT'},
+    {'id': 'st_y4_ai1', 'name': 'Y4 AI One',   'email': 'student.y4.ai1@bua.edu.eg',  'group': 'AI-4A', 'year': 'Year 4', 'academic_year': 4, 'major': 'AI'},
+    {'id': 'st_y4_ai2', 'name': 'Y4 AI Two',   'email': 'student.y4.ai2@bua.edu.eg',  'group': 'AI-4B', 'year': 'Year 4', 'academic_year': 4, 'major': 'AI'},
+    {'id': 'st_y4_ai3', 'name': 'Y4 AI Three', 'email': 'student.y4.ai3@bua.edu.eg',  'group': 'AI-4C', 'year': 'Year 4', 'academic_year': 4, 'major': 'AI'},
+    {'id': 'st_y4_ai4', 'name': 'Y4 AI Four',  'email': 'student.y4.ai4@bua.edu.eg',  'group': 'AI-4D', 'year': 'Year 4', 'academic_year': 4, 'major': 'AI'},
+    {'id': 'st_y4_ai5', 'name': 'Y4 AI Five',  'email': 'student.y4.ai5@bua.edu.eg',  'group': 'AI-4E', 'year': 'Year 4', 'academic_year': 4, 'major': 'AI'},
+    {'id': 'st_y4_ds1', 'name': 'Y4 DS One',   'email': 'student.y4.ds1@bua.edu.eg',  'group': 'DS-4A', 'year': 'Year 4', 'academic_year': 4, 'major': 'DS'},
+    {'id': 'st_y4_ds2', 'name': 'Y4 DS Two',   'email': 'student.y4.ds2@bua.edu.eg',  'group': 'DS-4B', 'year': 'Year 4', 'academic_year': 4, 'major': 'DS'},
+    {'id': 'st_y4_ds3', 'name': 'Y4 DS Three', 'email': 'student.y4.ds3@bua.edu.eg',  'group': 'DS-4C', 'year': 'Year 4', 'academic_year': 4, 'major': 'DS'},
+    {'id': 'st_y4_ds4', 'name': 'Y4 DS Four',  'email': 'student.y4.ds4@bua.edu.eg',  'group': 'DS-4D', 'year': 'Year 4', 'academic_year': 4, 'major': 'DS'},
+    {'id': 'st_y4_ds5', 'name': 'Y4 DS Five',  'email': 'student.y4.ds5@bua.edu.eg',  'group': 'DS-4E', 'year': 'Year 4', 'academic_year': 4, 'major': 'DS'},
 ]
 
 STUDENT_PROFILE = StudentProfile(
@@ -608,7 +597,7 @@ STUDENT_PROFILE = StudentProfile(
     name='Amara Osei',
     group='CS-3A',
     programme='BSc Computer Science',
-    year=3,
+    year=3, academic_year=3, major='CS',
     sessions=[
         StudentSession(id='s1', code='CS301', name='Algorithms & Complexity', staff='Dr. Chen Wei',
                        room='LT-101', day=0, slot=0, color='#2563eb'),
@@ -644,3 +633,52 @@ USERS: list[dict] = [
     {'email': 'prof.nwosu@staff.bua.edu.eg','password':'Staff1234',  'role': 'lecturer', 'name': 'Prof. Amara Nwosu'},
     {'email': 'amara@bua.edu.eg',          'password': 'Student1234','role': 'student',  'name': 'Amara Osei'},
 ]
+
+# Auto-add remaining managed students as users (student.y1.* etc.)
+_existing_emails = {u['email'].lower() for u in USERS}
+for _s in MANAGED_STUDENTS:
+    if _s['email'].lower() not in _existing_emails:
+        USERS.append({'email': _s['email'], 'password': 'Student1234', 'role': 'student', 'name': _s['name']})
+        _existing_emails.add(_s['email'].lower())
+
+
+# ── Courses / Sections (derived from timetable sessions) ─────────────────────
+
+def _build_sections() -> tuple[list[Course], list[Section]]:
+    seen: dict[str, Section] = {}
+    courses: dict[str, Course] = {}
+    for view in ('rooms', 'labs'):
+        for days in TIMETABLE.get(view, {}).values():
+            for slots in days.values():
+                if not isinstance(slots, dict):
+                    continue
+                for session in slots.values():
+                    if session is None or session.code in seen:
+                        continue
+                    if session.code not in courses:
+                        courses[session.code] = Course(
+                            id=f"crs-{session.code}", code=session.code,
+                            name=session.name, credits=3, year='Year 2', term='Fall',
+                        )
+                    seen[session.code] = Section(
+                        id=f"sec-{session.id}", course_id=f"crs-{session.code}",
+                        code=session.code, name=session.name, staff=session.staff,
+                        group=session.group, capacity=session.capacity,
+                        enrolled=session.enrolled, year='Year 2', term='Fall',
+                        academic_year=session.academic_year, major=session.major,
+                    )
+    return list(courses.values()), list(seen.values())
+
+
+COURSES, SECTIONS = _build_sections()
+
+# student_id -> registrations (link table replacement)
+REGISTRATIONS: list[CourseRegistration] = []
+
+# ── Notifications ────────────────────────────────────────────────────────────
+
+NOTIFICATIONS: list[Notification] = []
+
+# ── Audit Trail ──────────────────────────────────────────────────────────────
+
+AUDIT_LOGS: list["AuditEvent"] = []  # populated via services/audit.py

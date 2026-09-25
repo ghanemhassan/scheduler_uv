@@ -141,8 +141,10 @@ h1, h2, h3, h4, h5 { font-family: 'Outfit', sans-serif; }
 }
 .fade-up { animation: fade-up 0.25s ease-out both; }
 
-/* ─── Print ──────────────────────────────────────────────────────────────── */
+/* ─── Print → clean PDF ──────────────────────────────────────────────────── */
+@page { size: landscape; margin: 10mm; }
 @media print {
   header, aside, nav, .no-print { display: none !important; }
+  main button, button.fixed { display: none !important; }
   body { background: white; color: black; }
 }

@@ -292,29 +292,6 @@ function WeeklyCalendar({ events, role }: { events: CourseEvent[]; role: 'studen
 
   const visibleDays = selectedDay !== null ? [selectedDay] : [0, 1, 2, 3, 4];
 
-  const generateICS = () => {
-    const dayDates = ['20260119', '20260120', '20260121', '20260122', '20260123'];
-    const hh = (h: number) => String(h).padStart(2, '0');
-    const lines = [
-      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Bua University//EN', 'CALSCALE:GREGORIAN',
-      ...events.flatMap(ev => [
-        'BEGIN:VEVENT',
-        `UID:${ev.id}@bua.edu.eg`,
-        'DTSTAMP:20260115T080000Z',
-        `DTSTART:${dayDates[ev.day]}T${hh(ev.startHour)}0000`,
-        `DTEND:${dayDates[ev.day]}T${hh(ev.startHour + ev.duration)}0000`,
-        `SUMMARY:${ev.code} ${ev.name}`,
-        `LOCATION:${ev.room}\\, ${ev.building}`,
-        `DESCRIPTION:${ev.type} · ${ev.staff} · ${ev.group}`,
-        'END:VEVENT',
-      ]),
-      'END:VCALENDAR',
-    ];
-    const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'timetable.ics'; a.click();
-    URL.revokeObjectURL(url);
   };
 
   const totalHours = events.reduce((n, e) => n + e.duration, 0);
@@ -384,18 +361,7 @@ function WeeklyCalendar({ events, role }: { events: CourseEvent[]; role: 'studen
               <path d="M2 5h8v5a1 1 0 01-1 1H3a1 1 0 01-1-1V5z" stroke="currentColor" strokeWidth="1.1" />
               <path d="M4 8h4M4 10h2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
             </svg>
-            Print
-          </button>
-          <button
-            onClick={generateICS}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:opacity-90"
-            style={{ background: C.accent, color: '#fff', fontFamily: 'Inter, sans-serif' }}
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M6 1v7M3 6l3 3 3-3" stroke="white" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M1 10h10" stroke="white" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-            Export ICS
+            Print / PDF
           </button>
         </div>
       </div>

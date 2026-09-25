@@ -41,6 +41,9 @@ EquipmentItem = Literal[
 
 UserRole = Literal["admin", "lecturer", "student"]
 
+Major = Literal["CS", "IT", "AI", "DS"]
+AcademicYear = Literal[1, 2, 3, 4]
+
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -86,14 +89,17 @@ class Session(BaseModel):
     capacity: int
     enrolled: int
     color: str          # hex colour for the cell
+    slot: int = 0       # start time-slot index (0 = 08:00)
+    duration: int = 1   # number of consecutive slots
+    academic_year: Optional[int] = Field(None, description="1-4")
+    major: Optional[Major] = None  # CS/IT/AI/DS, optional for 1-2, required for 3-4
     conflict_id: Optional[str] = Field(None, alias="conflictId")
 
     class Config:
         populate_by_name = True
 
-# Grid: { view_mode → { row_label → { day_index → Session | null } } }
-# Serialised as dict of dicts in the response (None = empty slot).
-TimetableGrid = dict[str, dict[str, dict[int, Optional[Session]]]]
+# Grid: { view → { row → { day_index → { slot_index → Session | null } } } }
+TimetableGrid = dict[str, dict[str, dict[int, dict[int, Optional[Session]]]]]
 
 
 # ── Rooms ──────────────────────────────────────────────────────────────────────
@@ -171,6 +177,8 @@ class StudentSession(BaseModel):
     day: int            # 0-4
     slot: int           # 0-9
     color: str
+    academic_year: Optional[int] = None
+    major: Optional[Major] = None
 
 class Credit(BaseModel):
     code: str
@@ -185,6 +193,8 @@ class StudentProfile(BaseModel):
     group: str
     programme: str
     year: int
+    academic_year: Optional[int] = None
+    major: Optional[Major] = None
     sessions: list[StudentSession]
     credits: list[Credit]
     total_credits_required: int
@@ -196,3 +206,64 @@ class StudentProfile(BaseModel):
 class ApplyAlternativeRequest(BaseModel):
     conflict_id: str
     alternative_id: str
+
+
+# ── Courses / Sections / Registrations ───────────────────────────────────────
+
+class Course(BaseModel):
+    id: str
+    code: str           # e.g. "CS301"
+    name: str
+    credits: int = 3
+    year: str = 'Year 2'    # Year 1..4
+    term: str = 'Fall'      # Fall | Spring | Summer
+
+class Section(BaseModel):
+    id: str             # e.g. "sec-s1"
+    course_id: str
+    code: str           # course code snapshot, e.g. "CS301"
+    name: str
+    staff: str
+    group: str
+    capacity: int
+    enrolled: int = 0
+    year: str = 'Year 2'
+    term: str = 'Fall'
+    academic_year: Optional[int] = None  # 1-4 (target academic year)
+    major: Optional[Major] = None  # CS, IT, AI, DS (required for year 3-4)
+
+class CourseRegistration(BaseModel):
+    id: str
+    student_id: str
+    section_id: str
+    year: str
+    term: str
+    status: Literal["registered", "dropped"] = "registered"
+
+
+# ── Notifications ────────────────────────────────────────────────────────────
+
+class Notification(BaseModel):
+    id: str
+    audience: Literal["all", "admin", "lecturer", "student"] = "all"
+    email: Optional[str] = None   # targeted user, if any
+    type: str = "info"            # info | publish | timetable_change | conflict
+    message: str
+    related_id: Optional[str] = None
+    read: bool = False
+    created_at: str = ""
+
+
+# ── Audit Trail ──────────────────────────────────────────────────────────────
+
+class AuditEvent(BaseModel):
+    id: str
+    actor_email: str
+    actor_role: str = "admin"
+    action: str  # e.g. timetable_update, publish, archive, conflict_apply, room_update
+    entity_type: str  # timetable | version | conflict | room | student | section
+    entity_id: str
+    message: str = ""
+    before: Optional[dict] = None
+    after: Optional[dict] = None
+    created_at: str = ""

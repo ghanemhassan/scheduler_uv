@@ -1,49 +1,65 @@
-# BUA Project — Full Stack (Frontend + Backend)
+# نظام جدولة القاعات والمحاضرات
 
-Timetable, Room & Lab Allocation system — Bua University.
+نظام ويب لإدارة الجداول الأكاديمية وتوزيع المحاضرات على القاعات، مع أدوات لمتابعة التعارضات والطلاب وأعضاء هيئة التدريس.
 
-```
-bua-project-full/
-├── frontend/   React 19 + Vite + Tailwind (port 5173, proxy /api → :8000)
-└── backend/    FastAPI (port 8000)
-```
+## مكونات المشروع
 
-## Run backend
-```bat
+- `frontend/`: واجهة React وTypeScript تعمل باستخدام Vite.
+- `backend/`: واجهة برمجية مبنية باستخدام FastAPI، مع تخزين البيانات عبر SQLAlchemy.
+- `docs/`: مستندات المشروع.
+
+## المتطلبات
+
+- Python 3.10 أو أحدث.
+- Node.js 20 أو أحدث وnpm.
+- SQLite للتشغيل المحلي الافتراضي. يمكن استخدام MySQL عند ضبط `DATABASE_URL`.
+
+## التشغيل محلياً
+
+### الخادم الخلفي
+
+```bash
 cd backend
+python -m venv .venv
+```
+
+فعّل البيئة الافتراضية، ثم ثبّت الاعتماديات وشغّل الخادم:
+
+```bash
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env
-uvicorn app.main:app --port 8000
-```
-Health: http://127.0.0.1:8000/api/health — Docs: http://127.0.0.1:8000/docs
-
-### MySQL setup
-The backend now persists users, timetable cells, rooms, students, schedule versions, rows, and columns in MySQL. Create the database and an application user once:
-
-```sql
-CREATE DATABASE bua_project CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'bua_user'@'localhost' IDENTIFIED BY 'change_me';
-GRANT ALL PRIVILEGES ON bua_project.* TO 'bua_user'@'localhost';
-FLUSH PRIVILEGES;
+uvicorn app.main:app --reload --port 8000
 ```
 
-Set `DATABASE_URL` in `backend/.env` to the real credentials. On first startup the API creates its tables and seeds them from the demo data; later edits are persisted in MySQL.
+يستخدم الخادم SQLite محلياً افتراضياً، وينشئ قاعدة البيانات عند بدء التشغيل. للإعداد الاختياري عبر ملف البيئة، انسخ `backend/.env.example` إلى `backend/.env` وعدّل القيم حسب إعدادك.
 
-## Run frontend
-```bat
+### الواجهة الأمامية
+
+في نافذة طرفية أخرى:
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
-Open: http://localhost:5173 (shows API live / Offline in the toolbar)
 
-## Demo accounts
-| Role | Email | Password |
-|---|---|---|
-| admin | scheduler@bua.edu.eg | Admin1234 |
-| admin | admin@bua.edu.eg | Admin1234 |
-| lecturer | dr.chen@staff.bua.edu.eg | Staff1234 |
-| lecturer | prof.nwosu@staff.bua.edu.eg | Staff1234 |
-| student | amara@bua.edu.eg | Student1234 |
+افتح عنوان Vite الظاهر في الطرفية، وعادةً يكون `http://localhost:5173`. توثيق واجهة الخادم متاح على `http://127.0.0.1:8000/docs`، وفحص الصحة على `http://127.0.0.1:8000/api/health`.
 
-Offline demo mode: any `@bua.edu.eg` email + 8+ char password works when the backend is down.
+## قاعدة بيانات MySQL (اختياري)
+
+أنشئ قاعدة بيانات ومستخدماً مخصصاً للتطبيق، ثم عيّن رابط الاتصال في `backend/.env`:
+
+```env
+DATABASE_URL=mysql+pymysql://bua_user:كلمة_المرور@127.0.0.1:3306/bua_project
+```
+
+لا ترفع ملف `.env` أو بيانات اعتماد حقيقية إلى مستودع Git.
+
+## تشغيل واجهة API
+
+المسارات متاحة تحت `/api`، ويمكن استعراض المسارات والطلبات من صفحة Swagger على `/docs` بعد تشغيل الخادم.
+
+## ملاحظات أمنية
+
+حسابات وبيانات العرض المضمنة مخصصة للتطوير المحلي. قبل النشر، استخدم كلمات مرور وأسراراً قوية خاصة ببيئتك، واضبط `CORS_ORIGINS` على نطاقات الواجهة الموثوقة فقط.

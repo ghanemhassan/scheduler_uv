@@ -15,13 +15,32 @@ from app.models.schema import AnalyticsSummary, UtilizationPoint, ConflictStat
 router = APIRouter()
 
 
+def _iter_cells(view: str = 'rooms'):
+    """Yield every (day, slot, session) cell of a view (day → slot → session)."""
+    for days in TIMETABLE.get(view, {}).values():
+        if not isinstance(days, dict):
+            continue
+        for day, slots in days.items():
+            if isinstance(slots, dict):
+                for slot, session in slots.items():
+                    yield day, slot, session
+            elif slots is not None:
+                yield day, 0, slots
+
+
 def _room_utilization() -> list[UtilizationPoint]:
-    """Utilization as % of sessions filled across all days."""
+    """Utilization as % of slots filled across all days."""
     rooms_view = TIMETABLE.get('rooms', {})
     result = []
     for room_name, days in rooms_view.items():
-        total = len(days)
-        filled = sum(1 for s in days.values() if s is not None)
+        total, filled = 0, 0
+        if isinstance(days, dict):
+            for slots in days.values():
+                cells = slots.values() if isinstance(slots, dict) else [slots]
+                for s in cells:
+                    total += 1
+                    if s is not None:
+                        filled += 1
         pct = round(filled / total * 100) if total else 0
         result.append(UtilizationPoint(name=room_name, utilization=pct))
     return sorted(result, key=lambda x: x.utilization, reverse=True)
@@ -29,28 +48,25 @@ def _room_utilization() -> list[UtilizationPoint]:
 
 def _day_utilization() -> list[UtilizationPoint]:
     """How many sessions happen on each weekday (rooms view)."""
-    rooms_view = TIMETABLE.get('rooms', {})
-    day_counts: dict[int, int] = {d: 0 for d in range(5)}
-    total_rows = max(len(rooms_view), 1)
-    for days in rooms_view.values():
-        for day_idx, sess in days.items():
-            if sess is not None:
-                day_counts[day_idx] = day_counts.get(day_idx, 0) + 1
+    day_counts: dict[int, int] = {d: 0 for d in range(len(DAYS))}
+    total_rows = max(len(TIMETABLE.get('rooms', {})), 1)
+    for day, _slot, sess in _iter_cells('rooms'):
+        if sess is not None:
+            day_counts[day] = day_counts.get(day, 0) + 1
     return [
-        UtilizationPoint(name=DAYS[d], utilization=round(cnt / total_rows * 100))
+        UtilizationPoint(name=DAYS[d] if d < len(DAYS) else str(d),
+                         utilization=round(cnt / total_rows * 100))
         for d, cnt in day_counts.items()
     ]
 
 
 def _hour_utilization() -> list[UtilizationPoint]:
     """How busy each time slot is across all rooms."""
-    rooms_view = TIMETABLE.get('rooms', {})
     slot_counts: dict[int, int] = {s: 0 for s in range(len(TIME_SLOTS))}
-    total_rooms = max(len(rooms_view), 1)
-    for days in rooms_view.values():
-        for slot_idx, sess in days.items():
-            if sess is not None:
-                slot_counts[slot_idx] = slot_counts.get(slot_idx, 0) + 1
+    total_rooms = max(len(TIMETABLE.get('rooms', {})), 1)
+    for _day, slot, sess in _iter_cells('rooms'):
+        if sess is not None and slot in slot_counts:
+            slot_counts[slot] = slot_counts.get(slot, 0) + 1
     return [
         UtilizationPoint(name=TIME_SLOTS[s], utilization=round(cnt / total_rooms * 100))
         for s, cnt in slot_counts.items()
@@ -88,19 +104,23 @@ def _conflict_breakdown() -> list[ConflictStat]:
 def _total_sessions() -> int:
     return sum(
         1
-        for rows in TIMETABLE.values()
-        for days in rows.values()
-        for s in days.values()
+        for view in TIMETABLE
+        for _day, _slot, s in _iter_cells(view)
         if s is not None
     )
 
 
 def _rooms_at_capacity() -> int:
-    rooms_view = TIMETABLE.get('rooms', {})
     count = 0
-    for days in rooms_view.values():
-        for s in days.values():
-            if s and s.enrolled >= s.capacity:
+    for _day, _slot, s in _iter_cells('rooms'):
+        if s:
+            if isinstance(s, dict):
+                enrolled = s.get('enrolled', 0)
+                capacity = s.get('capacity', 0)
+            else:
+                enrolled = getattr(s, 'enrolled', 0)
+                capacity = getattr(s, 'capacity', 0)
+            if enrolled >= capacity:
                 count += 1
     return count
 
@@ -139,3 +159,127 @@ def util_by_hour():
 @router.get('/conflicts', response_model=list[ConflictStat])
 def conflict_stats():
     return _conflict_breakdown()
+
+
+@router.get('/edits')
+def admin_edits():
+    """Scheduler-edit activity from the audit trail (Data/BI measurement).
+
+    Counts timetable/version/conflict writes: total, average per active day,
+    and per-action breakdown. Average admin edits is a required AI metric.
+    """
+    try:
+        from app.data_store import AUDIT_LOGS as _LOGS
+    except Exception:
+        _LOGS = []
+    edits = [e for e in (_LOGS or [])
+             if (e.get('action') if isinstance(e, dict) else getattr(e, 'action', ''))
+             in ('timetable_update', 'conflict_apply', 'publish', 'version_create')]
+    by_day: dict[str, int] = {}
+    by_action: dict[str, int] = {}
+    for e in edits:
+        if isinstance(e, dict):
+            day = str(e.get('created_at', ''))[:10]
+            act = str(e.get('action', ''))
+        else:
+            day = str(getattr(e, 'created_at', ''))[:10]
+            act = str(getattr(e, 'action', ''))
+        by_day[day] = by_day.get(day, 0) + 1
+        by_action[act] = by_action.get(act, 0) + 1
+    active_days = len(by_day)
+    return {'total_edits': len(edits),
+            'active_days': active_days,
+            'avg_edits_per_day': round(len(edits) / active_days, 1) if active_days else 0,
+            'by_action': by_action}
+
+
+@router.get('/equipment')
+def equipment_bottlenecks():
+    """Per-equipment working-vs-total across labs (Data/BI): worst shortfalls first."""
+    try:
+        from app.data_store import ROOM_EQUIPMENT as _INV
+    except Exception:
+        _INV = {}
+    rows = []
+    for room, items in (_INV or {}).items():
+        for eq, q in (items or {}).items():
+            if not isinstance(q, dict):
+                continue
+            total = int(q.get('total', 0) or 0)
+            working = int(q.get('working', 0) or 0)
+            broken = max(0, total - working)
+            rows.append({
+                'room': room, 'equipment': eq, 'total': total,
+                'working': working, 'broken': broken,
+                'shortfall_pct': round(broken / total * 100) if total else 0,
+            })
+    return sorted(rows, key=lambda r: (-r['shortfall_pct'], -r['broken']))
+
+
+@router.get('/validation')
+def data_validation():
+    """Data-quality report (Data/BI): blocking issues in the planning data."""
+    issues: list[dict] = []
+
+    def _add(severity: str, code: str, message: str, where: str = '') -> None:
+        issues.append({'severity': severity, 'code': code, 'message': message, 'where': where})
+
+    cap_by_room: dict[str, int] = {}
+    for r in ALL_ROOMS or []:
+        name = r.get('name') if isinstance(r, dict) else getattr(r, 'name', None)
+        cap = r.get('capacity') if isinstance(r, dict) else getattr(r, 'capacity', 0)
+        if name:
+            cap_by_room[name] = cap or 0
+    # iterate with slot indexes preserved
+    for view in ('rooms', 'labs'):
+        for row, days in (TIMETABLE.get(view) or {}).items():
+            if not isinstance(days, dict):
+                continue
+            for day, slots in days.items():
+                items = list(slots.items()) if isinstance(slots, dict) else [(0, slots)]
+                for slot, s in items:
+                    if s is None:
+                        continue
+                    g = s.get if isinstance(s, dict) else None
+                    def _gv(attr: str, default=None):
+                        return g(attr, default) if g else getattr(s, attr, default)
+                    sid = _gv('id', '?')
+                    cell = f'{row} day {day} slot {slot}'
+                    if not _gv('staff') or _gv('staff') == 'Unassigned':
+                        _add('warning', 'NO_STAFF', f'Session {sid} has no assigned staff.', cell)
+                    if not _gv('group'):
+                        _add('warning', 'NO_GROUP', f'Session {sid} has no student group.', cell)
+                    if (_gv('enrolled', 0) or 0) <= 0:
+                        _add('info', 'NO_ENROLLED', f'Session {sid} has zero enrolled students.', cell)
+                    cap = cap_by_room.get(row)
+                    if cap is not None and (_gv('enrolled', 0) or 0) > cap:
+                        _add('error', 'OVER_CAPACITY', f'Session {sid}: enrolled {_gv("enrolled", 0)} exceeds {row} capacity {cap}.', cell)
+    for r in ALL_ROOMS or []:
+        name = r.get('name') if isinstance(r, dict) else getattr(r, 'name', None)
+        cap = r.get('capacity') if isinstance(r, dict) else getattr(r, 'capacity', 0)
+        if name and not cap:
+            _add('warning', 'ZERO_CAPACITY', f'Room {name} has zero capacity.', name)
+    order = {'error': 0, 'warning': 1, 'info': 2}
+    issues.sort(key=lambda i: (order.get(i['severity'], 9), i['code']))
+    return {'total': len(issues),
+            'errors': sum(1 for i in issues if i['severity'] == 'error'),
+            'warnings': sum(1 for i in issues if i['severity'] == 'warning'),
+            'issues': issues[:100]}
+
+
+@router.get('/occupancy')
+async def get_occupancy():
+    """Room occupancy statistics - used by chatbot."""
+    occ = []
+    for r in ALL_ROOMS:
+        room_days = TIMETABLE.get('rooms', {}).get(r.name, {})
+        used = sum(1 for s in room_days.values() if s is not None)
+        total = len(DAYS)
+        occ.append({
+            'room_id': r.id,
+            'room_number': r.name,
+            'used': used,
+            'total': total,
+            'pct': round(used/total*100) if total else 0
+        })
+    return sorted(occ, key=lambda x: -x['pct'])

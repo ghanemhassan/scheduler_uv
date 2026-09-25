@@ -1,7 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useTheme } from './theme';
 import { DAYS, TIME_SLOTS } from './data';
 import type { StudentSession } from './api/client';
+import { sections as sectionsApi, students as studentsApi } from './api/client';
+import type { Section } from './api/client';
 
 // ── Course catalog types ──────────────────────────────────────────────────────
 interface CourseSection {
@@ -376,27 +378,6 @@ function RegisteredCalendar({ events }: { events: CalEvent[] }) {
   const [selected, setSelected] = useState<CalEvent | null>(null);
   const HOURS = ['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
 
-  const exportICS = () => {
-    const dayDates = ['20260119', '20260120', '20260121', '20260122', '20260123'];
-    const slotHour = (s: number) => String(8 + s).padStart(2, '0');
-    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Bua University//EN', 'CALSCALE:GREGORIAN',
-      ...events.flatMap(ev => [
-        'BEGIN:VEVENT',
-        `UID:${ev.id}@bua.edu.eg`,
-        'DTSTAMP:20260115T080000Z',
-        `DTSTART:${dayDates[ev.day]}T${slotHour(ev.slot)}0000`,
-        `DTEND:${dayDates[ev.day]}T${slotHour(ev.slot + 1)}0000`,
-        `SUMMARY:${ev.code} — ${ev.name}`,
-        `LOCATION:${ev.room}\\, ${ev.building}`,
-        `DESCRIPTION:Lecturer ${ev.lecturer}`,
-        'END:VEVENT',
-      ]),
-      'END:VCALENDAR'];
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/calendar' }));
-    a.download = 'my-timetable.ics'; a.click();
-  };
-
   const lookup: Record<number, Record<number, CalEvent>> = {};
   events.forEach(ev => { if (!lookup[ev.day]) lookup[ev.day] = {}; lookup[ev.day][ev.slot] = ev; });
 
@@ -422,12 +403,7 @@ function RegisteredCalendar({ events }: { events: CalEvent[] }) {
           <button onClick={() => window.print()}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all hover:opacity-80"
             style={{ background: 'transparent', color: C.textMuted, border: `1px solid ${C.border}` }}>
-            Print
-          </button>
-          <button onClick={exportICS}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all hover:opacity-80"
-            style={{ background: 'transparent', color: C.textMuted, border: `1px solid ${C.border}` }}>
-            Export ICS
+            Print / PDF
           </button>
         </div>
       </div>
@@ -573,11 +549,35 @@ function RegistrationTab({ wishlist, onToggle, applied, onApply }: {
   const [termFilter, setTermFilter] = useState<'All Terms' | Term>('All Terms');
   const [listMode, setListMode] = useState<'all' | 'wishlist'>('all');
   const [justApplied, setJustApplied] = useState(false);
+  const [serverSections, setServerSections] = useState<Section[]>([]);
+  const [serverState, setServerState] = useState<'idle' | 'saving' | 'saved' | 'offline'>('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await sectionsApi.list();
+        if (!cancelled) setServerSections(Array.isArray(s) ? s : []);
+      } catch { /* offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleApply = () => {
     onApply();
     setJustApplied(true);
     setTimeout(() => setJustApplied(false), 2500);
+    // Best-effort server sync: match wishlist courses to backend sections by code.
+    const codes = CATALOG.filter(c => wishlist.has(c.id)).map(c => c.code);
+    const ids = codes.map(code => serverSections.find(s => s.code === code)?.id).filter((x): x is string => !!x);
+    if (ids.length === 0) return;
+    setServerState('saving');
+    studentsApi.registerMine(
+      ids,
+      yearFilter === 'All Years' ? 'Year 2' : yearFilter,
+      termFilter === 'All Terms' ? 'Fall' : termFilter,
+    ).then(() => setServerState('saved'))
+      .catch(() => setServerState('offline'));
   };
 
   const filtered = useMemo(() => {
@@ -614,7 +614,7 @@ function RegistrationTab({ wishlist, onToggle, applied, onApply }: {
           {justApplied && (
             <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold" style={{ background: C.successBg, color: C.success, border: `1px solid ${C.success}30` }}>
               <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              Schedule updated
+              Schedule updated{serverState === 'saved' ? ' · saved to server ✓' : serverState === 'saving' ? ' · saving…' : serverState === 'offline' ? ' · server offline' : ''}
             </div>
           )}
         </div>
