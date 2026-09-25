@@ -1,29 +1,29 @@
-# نظام جدولة القاعات والمحاضرات
+# BUA Timetable and Room Scheduling System
 
-نظام ويب لإدارة الجداول الأكاديمية وتوزيع المحاضرات على القاعات، مع أدوات لمتابعة التعارضات والطلاب وأعضاء هيئة التدريس.
+A web application for managing academic timetables and room allocations, with tools for tracking scheduling conflicts, students, and faculty members.
 
-## مكونات المشروع
+## Project Structure
 
-- `frontend/`: واجهة React وTypeScript تعمل باستخدام Vite.
-- `backend/`: واجهة برمجية مبنية باستخدام FastAPI، مع تخزين البيانات عبر SQLAlchemy.
-- `docs/`: مستندات المشروع.
+- `frontend/`: React and TypeScript user interface powered by Vite.
+- `backend/`: FastAPI service with SQLAlchemy-based data storage.
+- `docs/`: Project documentation.
 
-## المتطلبات
+## Requirements
 
-- Python 3.10 أو أحدث.
-- Node.js 20 أو أحدث وnpm.
-- SQLite للتشغيل المحلي الافتراضي. يمكن استخدام MySQL عند ضبط `DATABASE_URL`.
+- Python 3.10 or later.
+- Node.js 20 or later and npm.
+- SQLite for the default local setup. MySQL is also supported through `DATABASE_URL`.
 
-## التشغيل محلياً
+## Local Development
 
-### الخادم الخلفي
+### Backend
 
 ```bash
 cd backend
 python -m venv .venv
 ```
 
-فعّل البيئة الافتراضية، ثم ثبّت الاعتماديات وشغّل الخادم:
+Activate the virtual environment, install the dependencies, and start the API:
 
 ```bash
 # Windows PowerShell: .venv\Scripts\Activate.ps1
@@ -32,11 +32,11 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-يستخدم الخادم SQLite محلياً افتراضياً، وينشئ قاعدة البيانات عند بدء التشغيل. للإعداد الاختياري عبر ملف البيئة، انسخ `backend/.env.example` إلى `backend/.env` وعدّل القيم حسب إعدادك.
+The backend uses SQLite by default and creates the database on startup. To configure environment variables, copy `backend/.env.example` to `backend/.env` and update the values for your setup.
 
-### الواجهة الأمامية
+### Frontend
 
-في نافذة طرفية أخرى:
+In a separate terminal:
 
 ```bash
 cd frontend
@@ -44,22 +44,22 @@ npm install
 npm run dev
 ```
 
-افتح عنوان Vite الظاهر في الطرفية، وعادةً يكون `http://localhost:5173`. توثيق واجهة الخادم متاح على `http://127.0.0.1:8000/docs`، وفحص الصحة على `http://127.0.0.1:8000/api/health`.
+Open the Vite URL shown in the terminal. It is usually `http://localhost:5173`. The API documentation is available at `http://127.0.0.1:8000/docs`, and the health endpoint is `http://127.0.0.1:8000/api/health`.
 
-## قاعدة بيانات MySQL (اختياري)
+## MySQL Setup (Optional)
 
-أنشئ قاعدة بيانات ومستخدماً مخصصاً للتطبيق، ثم عيّن رابط الاتصال في `backend/.env`:
+Create a database and a dedicated application user, then set the connection URL in `backend/.env`:
 
 ```env
-DATABASE_URL=mysql+pymysql://bua_user:كلمة_المرور@127.0.0.1:3306/bua_project
+DATABASE_URL=mysql+pymysql://bua_user:your_password@127.0.0.1:3306/bua_project
 ```
 
-لا ترفع ملف `.env` أو بيانات اعتماد حقيقية إلى مستودع Git.
+Never commit `.env` files or real credentials to Git.
 
-## تشغيل واجهة API
+## API
 
-المسارات متاحة تحت `/api`، ويمكن استعراض المسارات والطلبات من صفحة Swagger على `/docs` بعد تشغيل الخادم.
+API routes are available under `/api`. Once the backend is running, use `/docs` to browse the interactive Swagger documentation.
 
-## ملاحظات أمنية
+## Security Notes
 
-حسابات وبيانات العرض المضمنة مخصصة للتطوير المحلي. قبل النشر، استخدم كلمات مرور وأسراراً قوية خاصة ببيئتك، واضبط `CORS_ORIGINS` على نطاقات الواجهة الموثوقة فقط.
+Bundled accounts and sample data are intended for local development. Before deployment, use strong environment-specific passwords and secrets, and restrict `CORS_ORIGINS` to trusted frontend domains.
